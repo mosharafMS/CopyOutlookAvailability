@@ -13,7 +13,10 @@ param(
     [string]$EndTime = "17:00",
 
     [Parameter()]
-    [int]$MinimumSlotMinutes = 30
+    [int]$MinimumSlotMinutes = 30,
+
+    [Parameter()]
+    [int]$SlotsPerDay = 3
 )
 
 try {
@@ -23,6 +26,7 @@ try {
     Write-Verbose "StartTime: $StartTime"
     Write-Verbose "EndTime: $EndTime"
     Write-Verbose "Minimum slot duration: $MinimumSlotMinutes minutes"
+    Write-Verbose "Slots per day: $SlotsPerDay"
     Write-Verbose "-------------------"
 
     if (!(Get-Module -ListAvailable -Name Microsoft.Graph)) {
@@ -103,7 +107,11 @@ try {
         Write-Verbose "Workday starts at $($dayStart.ToString('HH:mm')), ends at $($dayEnd.ToString('HH:mm'))"
 
         # Get all busy periods for this day, sorted
-        $dayBusy = $busyPeriods | Where-Object { $_.Start.Date -eq $currentDate.Date } | Sort-Object Start
+        $dayBusy = $busyPeriods | Where-Object { 
+            $_.Start.Date -eq $currentDate.Date -and 
+            $_.Start -lt $dayEnd -and 
+            $_.End -gt $dayStart 
+        } | Sort-Object Start
         Write-Verbose "Found $($dayBusy.Count) busy periods for this day."
         foreach ($b in $dayBusy) {
             Write-Verbose ("Busy: {0} to {1} | {2}" -f $b.Start.ToString('HH:mm'), $b.End.ToString('HH:mm'), $b.Subject)
@@ -150,18 +158,31 @@ try {
         $currentDate = $currentDate.AddDays(1)
     }
 
-    # Group slots by date for better organization
-    $groupedSlots = $availableSlots | Group-Object { $_.Start.Date }
+    # Group slots by date and select top 3 slots per day with preference for afternoon
+    $groupedSlots = $availableSlots | Group-Object { $_.Start.Date } | ForEach-Object {
+        $date = [DateTime]$_.Name
+        $slots = $_.Group | Where-Object { $_.End -le $date.Add($endDateTime.TimeOfDay) } | Sort-Object { 
+            # Sort by afternoon preference (slots after 12:00 PM get higher priority)
+            $isAfternoon = $_.Start.Hour -ge 12
+            $timeScore = $_.Start.Hour * 60 + $_.Start.Minute
+            # Afternoon slots get a bonus score of 1000
+            $timeScore + ($isAfternoon ? 1000 : 0)
+        } -Descending | Select-Object -First $SlotsPerDay | Sort-Object Start
+        @{
+            Date = $date
+            Slots = $slots
+        }
+    }
 
     # Prepare output for clipboard
     $output = "USER AVAILABILITY`n====================="
     foreach ($dateGroup in $groupedSlots) {
-        $date = [DateTime]$dateGroup.Name
+        $date = $dateGroup.Date
         $output += "`n$($date.DayOfWeek) $($date.ToString('yyyy-MM-dd'))`n-------------------------"
-        if ($dateGroup.Group.Count -eq 0) {
+        if ($dateGroup.Slots.Count -eq 0) {
             $output += "`n  No available slots"
         } else {
-            foreach ($slot in $dateGroup.Group) {
+            foreach ($slot in $dateGroup.Slots) {
                 $output += "`n  From {0} to {1}" -f $slot.Start.ToString('hh:mm tt'), $slot.End.ToString('hh:mm tt')
             }
         }
